@@ -38,9 +38,10 @@ class extractor():
         self.windowManager = _overseer(numRows=self.numRows,
                                        rgbType=self.rgbType)
         self.windowManager(cubes,xaxis)
-        sys.exit(app.exec_())
+        app.exec_()
         
-        del self.windowManager.cubes, self.windowManager.xaxis
+        # Return the clicked vectors.
+        return self.windowManager.vecArchive.archive
 
 
 """
@@ -49,6 +50,7 @@ Class to manage the datacube display.
 class _overseer(QtWidgets.QMainWindow):
     sendData_currLoc_signal = QtCore.pyqtSignal(tuple)
     sendData_clicked_signal = QtCore.pyqtSignal(tuple)
+    remData_clicked_signal = QtCore.pyqtSignal()
 
     
     def __init__(self, numRows, rgbType):
@@ -111,9 +113,11 @@ class _overseer(QtWidgets.QMainWindow):
         self.vecArchive = vecArchive(self.numRows)
         # Now connect slots and signals.
         self.tracker.posChanged_signal.connect(self.extractVector)
-        self.tracker.clicked_signal.connect(self.saveVector)
+        self.tracker.leftClicked_signal.connect(self.saveVector)
+        self.tracker.rightClicked_signal.connect(self.remVector)
         self.sendData_currLoc_signal.connect(self.vecDisplay.plotData)
         self.sendData_clicked_signal.connect(self.vecArchive.plotData)
+        self.remData_clicked_signal.connect(self.vecArchive.remData)
     
         self.show()
 
@@ -153,7 +157,35 @@ class _overseer(QtWidgets.QMainWindow):
         self.sendData_clicked_signal.emit((self.xaxis,vecs,(pos.x(),pos.y())))
         # Add circle to image to mark selected point.
         self.addCircle(pos, self.rgb_forDisp[pos.y(),pos.x(),:])
-        
+    
+    @QtCore.pyqtSlot()
+    def remVector(self):
+        # Remove the most recent circle from the image.
+        self.remCircle()
+        # Remove the most recent vector from vecArchive.
+        self.remData_clicked_signal.emit()
+        # Note: We do it in this order to prevent a race condition between the
+        #       signal connection function executing (pops from the archive) 
+        #       and the circle being removed (reads from the archive).
+    
+    def remCircle(self):
+        # Reset the pixmap.
+        image = QtGui.QImage(self.rgb_forDisp,
+                             self.rgb_forDisp.shape[1],
+                             self.rgb_forDisp.shape[0],
+                             self.rgb_forDisp.shape[1] * 3,
+                             QtGui.QImage.Format_RGB888)
+        pixmap = QtGui.QPixmap(image)
+        self.label.setPixmap(pixmap)
+        # Add in all circles but the last one. This is more memory efficient
+        # (since you don't have to store every pixmap), but requires a little
+        # bit more time. This should be okay, though, since drawing is fast.
+        for selected in self.vecArchive.archive[:-1]:
+            loc = QtCore.QPoint()
+            loc.setX(selected[2][0])
+            loc.setY(selected[2][1])
+            self.addCircle(loc,self.rgb_forDisp[loc.y(),loc.x(),:])
+    
     def addCircle(self, pos, rgbVal):
         rgbVal = rgbVal.astype(float)
         # Get pixmap currently being used.
@@ -182,32 +214,39 @@ Supporting class for mouse tracking.
 """
 class mouseTracker(QtCore.QObject):
     posChanged_signal = QtCore.pyqtSignal(QtCore.QPoint)
-    clicked_signal = QtCore.pyqtSignal(QtCore.QPoint)
+    leftClicked_signal = QtCore.pyqtSignal(QtCore.QPoint)
+    rightClicked_signal = QtCore.pyqtSignal()
 
     def __init__(self, widget):
         super().__init__(widget)
         self._widget = widget
-        self.widget.setMouseTracking(True)
-        self.widget.installEventFilter(self)
-        self.clickedDown = False
-
-    @property
-    def widget(self):
-        return self._widget
+        self._widget.setMouseTracking(True)
+        self._widget.installEventFilter(self)
+        self.leftClickedDown = False
+        self.rightClickedDown = False
 
     def eventFilter(self, o, e):
-        if o is self.widget and e.type() == QtCore.QEvent.MouseMove:
+        # Send a new vector whenever the mouse moves.
+        if o is self._widget and e.type() == QtCore.QEvent.MouseMove:
             self.posChanged_signal.emit(e.pos())
-            self.clickedDown = False
-        elif o is self.widget and e.type() == QtCore.QEvent.MouseButtonPress:
-            print('Down!')
-            self.clickedDown = True
-        elif o is self.widget and e.type() == QtCore.QEvent.MouseButtonRelease\
-            and self.clickedDown:
-            print('Up!')
-            self.clicked_signal.emit(e.pos())
-            self.clickedDown = False
-
+            self.leftClickedDown = False
+        # Add vector to archive if the left mousebutton clicked.
+        elif o is self._widget and e.type() == QtCore.QEvent.MouseButtonPress\
+            and e.button() == QtCore.Qt.LeftButton:
+            self.leftClickedDown = True
+        elif o is self._widget and e.type() == QtCore.QEvent.MouseButtonRelease\
+            and self.leftClickedDown and e.button() == QtCore.Qt.LeftButton:
+            self.leftClicked_signal.emit(e.pos())
+            self.leftClickedDown = False
+        # Now remove the most recent vector if the right mousebutton clicked.
+        elif o is self._widget and e.type() == QtCore.QEvent.MouseButtonPress\
+            and e.button() == QtCore.Qt.RightButton:
+            self.rightClickedDown = True
+        elif o is self._widget and e.type() == QtCore.QEvent.MouseButtonRelease\
+            and self.rightClickedDown and e.button() == QtCore.Qt.RightButton:
+            self.rightClicked_signal.emit()
+            self.rightClickedDown = False
+            
         return super().eventFilter(o, e)
 
 """
@@ -258,6 +297,8 @@ Class to manage display of selected points in the image.
 class vecArchive(QtWidgets.QWidget):
     def __init__(self, numRows, colors=None, numColors=10, seed=5):
         super().__init__()
+        # Make the data archive
+        self.archive = []
         # Store how many rows we want in the visualization.
         self.numRows = numRows
         self.numPlots = 0 # Used to track where new data should be stored.
@@ -283,10 +324,13 @@ class vecArchive(QtWidgets.QWidget):
         
     @QtCore.pyqtSlot(tuple)
     def plotData(self,data):
-        # First get the new min and max values.
+        # Pull data from the sent tuple.
         x = data[0]
         yset = data[1]
         posx,posy = data[2]
+        # Add new data to the archive.
+        self.archive.append((x,yset,(posx,posy)))
+        # Get the new min and max values.
         for vec in yset:
             self.miny = np.minimum(self.miny,vec.min())
             self.maxy = np.maximum(self.maxy,vec.max())
@@ -298,9 +342,9 @@ class vecArchive(QtWidgets.QWidget):
                               title='Pos: ('+str(posx)+', '+str(posy)+')')
         # Plot data in specified plot.
         self.pglayout.getItem(currRow,currCol).plot(x,
-                                                    yset.pop(0),
+                                                    yset[0],
                                                     pen='w')
-        for ind,y in enumerate(yset):
+        for ind,y in enumerate(yset[1:]):
             cInd = np.mod(ind,self.numColors)
             self.pglayout.getItem(currRow,currCol).plot(x,
                                                         y,
@@ -308,16 +352,52 @@ class vecArchive(QtWidgets.QWidget):
                                                         pen=self.colors\
                                                             [:,cInd])
         self.numPlots+=1 # Increment number of plots.
-        # Now update x and y ranges for all plots.
+        # Now update y ranges for all plots.
         for i in range(self.numPlots):
             c = int(i/self.numRows)
             r = np.mod(i,self.numRows)
-            self.pglayout.getItem(r,c).setXRange(x.min(),
-                                                 x.max(),
-                                                 padding=0.05)
             self.pglayout.getItem(r,c).setYRange(self.miny,
                                                  self.maxy,
                                                  padding=0.05)
+        
+    @QtCore.pyqtSlot()
+    def remData(self):
+        # Make sure there is a plot to remove.
+        if self.numPlots>0:
+            # Remove data from archive
+            self.archive.pop(-1)
+            # Decerement number of plots.
+            self.numPlots -= 1
+            # Remove plot from layout.
+            mostRecentCol = int((self.numPlots)/self.numRows)
+            mostRecentRow = np.mod((self.numPlots),self.numRows)
+            self.pglayout.removeItem(self.pglayout.getItem(mostRecentRow,
+                                                           mostRecentCol))
+            # Get what the appropriate bounds should be.
+            self.miny = np.inf
+            self.maxy = -np.inf
+            for i in range(self.numPlots):
+                c = int(i/self.numRows)
+                r = np.mod(i,self.numRows)
+                print(str(c)+','+str(r))
+                # Get the min and max for the plot
+                plotmin = np.inf
+                plotmax = -np.inf
+                for item in self.pglayout.getItem(r,c).listDataItems():
+                    y = item.getData()[1]
+                    plotmin = np.minimum(plotmin,y.min())
+                    plotmax = np.maximum(plotmax,y.max())
+                # Check if we need to update overall min/max.
+                self.miny = np.minimum(plotmin,self.miny)
+                self.maxy = np.maximum(plotmax,self.maxy)
+            # Now update y ranges for all plots.
+            for i in range(self.numPlots):
+                c = int(i/self.numRows)
+                r = np.mod(i,self.numRows)
+                self.pglayout.getItem(r,c).setYRange(self.miny,
+                                                     self.maxy,
+                                                     padding=0.05)
+                
 """
 Method to interpolate a datacube to be on the same grid as a reference 
 datacube.
@@ -457,4 +537,4 @@ if __name__ == '__main__':
     cubes = tuple(cubes)
     
     se = extractor()
-    se(cubes,np.linspace(400,700,cubes[0].shape[2]))
+    arc = se(cubes,np.linspace(400,700,cubes[0].shape[2]))
