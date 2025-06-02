@@ -27,17 +27,25 @@ CALL ARGUMENTS:
            the interpolated vectors associated with each X-Y point displayed
            upon mouseover.
     xaxis: A tuple of 1-D ndarrays. The x-axis corresponding to each datacube.
+    region: A boolean ndarray the same length as the 3rd dimension of the first
+            cube in the tuple. Wherever this array is True is used for
+            visualization. Note that this does not effect the displayed or 
+            saved vectors: just the RGB display.
 """
 class extractor():
-    def __init__(self, numRows=6, rgbType='Si-incl'):
+    def __init__(self, numRows=6, rgbType='equal'):
         self.numRows = numRows
         self.rgbType = rgbType
     
-    def __call__(self, cubes, xaxis):
+    def __call__(self, cubes, xaxis, region=None):
+        # Default to using everything for the RGB display.
+        if region is None:
+            region = np.ones((cubes[0].shape[2],),dtype=bool)
+        # Build the window manager, then run the application.
         app = QtWidgets.QApplication(sys.argv)
         self.windowManager = _overseer(numRows=self.numRows,
                                        rgbType=self.rgbType)
-        self.windowManager(cubes,xaxis)
+        self.windowManager(cubes, xaxis, region)
         app.exec_()
         
         # Return the clicked vectors.
@@ -59,7 +67,7 @@ class _overseer(QtWidgets.QMainWindow):
         self.numRows = numRows
         self.rgbType = rgbType
         
-    def __call__(self, cubes, xaxis):
+    def __call__(self, cubes, xaxis, region):
         # Put all cubes on the same scale. (Uses first cube as reference)
         ref = cubes[0]
         cubesInterp = [ref]
@@ -72,9 +80,9 @@ class _overseer(QtWidgets.QMainWindow):
         self.xaxis = xaxis
         
         # Make windows.
-        self._setupGUI(cubesInterp, xaxis)
+        self._setupGUI(cubesInterp, xaxis, region)
     
-    def _setupGUI(self, cubes, xaxis):
+    def _setupGUI(self, cubes, xaxis, region):
         # Set title.
         self.setWindowTitle('Main Image')
         # Set width and height, then move to center of the screen.
@@ -85,10 +93,9 @@ class _overseer(QtWidgets.QMainWindow):
                   - self.frameGeometry().center())
         
         # Make an false-color RGB version of the datacube.
-        region = np.ones((self.cubes[0].shape[2]),dtype=bool)
         self.rgb_forDisp = makeRGB(self.cubes[0],
                                    region,
-                                   method='Si-incl',
+                                   method=self.rgbType,
                                    cubeX=xaxis)
         
         # Scale and normalize for display
@@ -259,7 +266,7 @@ class vecDisplay(QtWidgets.QWidget):
         self.miny = miny
         self.maxy = maxy
         # Get array of plotting colors.
-        if colors==None:    
+        if colors == None:    
             self.numColors = numColors
             rng = np.random.default_rng(seed=seed)
             self.colors = rng.integers(0,255,(3,numColors))
@@ -303,7 +310,7 @@ class vecArchive(QtWidgets.QWidget):
         self.numRows = numRows
         self.numPlots = 0 # Used to track where new data should be stored.
         # Get array of plotting colors.
-        if colors==None:    
+        if colors == None:    
             self.numColors = numColors
             rng = np.random.default_rng(seed=seed)
             self.colors = rng.integers(0,255,(3,numColors))
@@ -446,21 +453,13 @@ CALL ARGUMENTS:
                  is not contiguous, the entries in cube where region is False
                  will be removed before the representation is computed. Sum all
                  entries within each section to get the R, G, and B components.
-        'Si-excl': Uses the response of a CMV2K sensor to estimate what an
-                   RGB sensor would see. If region is not contiguous, the
-                   entries in cube where region is False will be removed before
-                   the representation is computed. The first True value in
-                   region will be treated as 400 nm, the last True value in
-                   region will be treated as 700 nm. The True entries will be
-                   assumed to be equally far apart from each other.
-        'Si-incl': Same as Si-excl, but the entries in cube where region is
-                   False are not removed. Instead, their Si response is set to
-                   zero before the representation is computed.
+        'Si': Uses the response of a CMV2K sensor to estimate what an RGB
+              sensor would see. The Si response where region is False is set to
+              zero before the representation is computed.
     cubeX: 1-D ndarray. The x-values for the datacube's 3rd dimension. Only
-           used for method='Si-excl' and method='Si-incl'. If not input, it is
-           assumed that the range is 400-1000, equally spaced. If input, it
-           should be the same length as the cube's 3rd dimension (after any
-           effects from region).
+           used for method='Si'. If not input, it is assumed that the range is 
+           400-1000, equally spaced. If input, it should be the same length as 
+           the cube's 3rd dimension (after any effects from region).
 RETURNS:
     rgb: The datacube as an rgb image.
 NOTES:
@@ -491,9 +490,6 @@ def makeRGB(cube, region, method='equal', cubeX=None):
         # Make sure we have x-values.
         if cubeX is None:
             cubeX = np.linspace(400,1000,num=cube.shape[2])
-        # If using Si-excl, then use region to select a section.
-        if method == 'Si-excl':
-            cube = cube[:,:,region].astype(float)
         # Put the response curves on the same grid as the input data.
         interpRed = interp1d(redResponse[:,0],
                              redResponse[:,1],
@@ -510,11 +506,10 @@ def makeRGB(cube, region, method='equal', cubeX=None):
                               fill_value='extrapolate')
         blueResponse = np.array([cubeX,
                                  interpBlue(cubeX)]).T
-        # If using Si-incl, zero-out the response where region is False
-        if method == 'Si-incl':
-            redResponse[~region,1] = 0
-            greenResponse[~region,1] = 0
-            blueResponse[~region,1] = 0
+        # Zero-out the response where region is False.
+        redResponse[~region,1] = 0
+        greenResponse[~region,1] = 0
+        blueResponse[~region,1] = 0
         # Now take the inner product of the response and the input, divided by
         # the length of xCube.
         n,m,p = cube.shape
@@ -536,5 +531,7 @@ if __name__ == '__main__':
         cubes.append(cube+i*1000)
     cubes = tuple(cubes)
     
-    se = extractor()
-    arc = se(cubes,np.linspace(400,700,cubes[0].shape[2]))
+    se = extractor(rgbType='Si')
+    region = np.ones((cubes[0].shape[2]),dtype=bool)
+    region[:15] = 0
+    arc = se(cubes,np.linspace(400,700,cubes[0].shape[2]),region=region)
