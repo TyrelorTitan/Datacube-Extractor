@@ -484,9 +484,9 @@ def makeRGB(cube, region, method='equal', cubeX=None):
         
     elif method[:2] == 'Si':
         # Load in CMV2K spectral responses.
-        redResponse = np.array(pd.read_csv('./CMV2K_response_red.csv'))
-        greenResponse = np.array(pd.read_csv('./CMV2K_response_green1.csv'))
-        blueResponse = np.array(pd.read_csv('./CMV2K_response_blue.csv'))
+        redResponse = np.array(pd.read_csv('./CMV2K_responses/CMV2K_red.csv'))
+        greenResponse = np.array(pd.read_csv('./CMV2K_responses/CMV2K_green1.csv'))
+        blueResponse = np.array(pd.read_csv('./CMV2K_responses/CMV2K_blue.csv'))
         # Make sure we have x-values.
         if cubeX is None:
             cubeX = np.linspace(400,1000,num=cube.shape[2])
@@ -524,7 +524,7 @@ if __name__ == '__main__':
     """ Code Demo """
     # This hyperspectral datacube comes from the CAVE dataset.
     # https://cave.cs.columbia.edu/repository/Multispectral
-    cubepath = "./jelly_beans_ms.npy" 
+    cubepath = "./Example_image/jelly_beans_ms.npy" 
     cube = np.load(cubepath).astype(float)
     cubes = []
     for i in range(4):
